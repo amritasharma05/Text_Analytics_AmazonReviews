@@ -1,0 +1,592 @@
+---
+title: "Amazon Fine Food Reviews"
+author: "Preethi, Amrita"
+date: "6/4/2018"
+output: html_document
+---
+
+```{r}
+suppressMessages(library(magrittr))
+suppressMessages(library(text2vec))
+suppressMessages(library(topicmodels))
+suppressMessages(library(dplyr))
+suppressMessages(library(lsa))
+suppressMessages(library(data.table))
+suppressMessages(library(sqldf))
+suppressMessages(library(tm))
+suppressMessages(library(mallet))
+suppressMessages(library(rJava))
+suppressMessages(library(glmnet))
+suppressMessages(library(MASS))
+suppressMessages(library(koRpus))
+suppressMessages(library(sentimentr))
+suppressMessages(library(quanteda))
+suppressMessages(library(e1071))
+library("mlbench")
+library("caret")
+library(wordcloud)
+library(MASS)
+library(class)
+library(rpart)
+library(xgboost)
+```
+
+Exploratory Data Analysis
+```{r}
+data<-fread('Reviews.csv')
+
+# No duplicate rows
+data[duplicated(data),]
+
+head(data)
+
+#Checking if each profile name corresponds to one user id
+length(unique(data$ProfileName)) #218418
+length(unique(data$UserId)) #256059
+length(unique(data$ProductId)) # 74258
+# There are 74258 products rated in this reviews data set.
+
+# Number of unique userids is greater than unique profile names.
+head(data$ProfileName)
+
+# Checking how many user ids is profile name 'Karl' mapping to.
+data[data$ProfileName=='Karl',]$UserId
+# Profile Karl is mapping to multiple user ids. This means that profile name is not unique. Different users can have the same profile name.
+
+hist(data$Score)
+# Majority of people has rated the product "5". Very few people has given '2' ratings to the product.   
+
+# Number of users who indicated whether they found the review helpful. Very few reviews have been voted by users as a helpful reviews
+sort(table(data$HelpfulnessDenominator),descending=FALSE)
+
+# Number of users who found the review helpful. Very few reviews have been voted by users as helpful reviews
+sort(table(data$HelpfulnessNumerator),descending=FALSE)
+
+# Ignoring rows where number of users who found the review helpful is greater than the number of users who voted for whether they found the review helpful
+data=data[!data$HelpfulnessNumerator>data$HelpfulnessDenominator,]
+
+# Check to find out whether we had mltiple records with same reviews for the same user and product
+valid = sqldf("select count(*) as count1,UserId,ProductID from data  group by userID, ProductID having count1 > 1")
+
+# Picked first two users and products to see if they have the same reviews
+df1<- sqldf("select * from data where UserId in('A29JUMRL1US6YP','A3TVZM3ZIXG8YW') and ProductID in( 'B000084EZ4','B0002MLA5K')" )
+# Same reviews for the same user and product.
+```
+
+There were two scenarios in which bots give spam ratings.
+1. For the same userID and productID we have multiple records with same reviews at the same time. 
+2. Irrespective of the product, the same user has rated multiple products at the same time with the same reviews.
+
+In both these scenarios, reviews were given by the same user exactly at the same time. This is how we identified the spam ratings and eliminated those reviews.
+
+```{r}
+nonspamdf = sqldf("select Id,UserId,Time,count(*) as Num_reviews, Score, Text,HelpfulnessNumerator,HelpfulnessDenominator, Summary from data group by UserId, Time having count(*)=1 " )
+spamdf = sqldf("select Id,UserId,Time,count(*) as Num_reviews, Score, Text,HelpfulnessNumerator,HelpfulnessDenominator, Summary from data group by UserId, Time having count(*)>1 " )
+
+hist(nonspamdf$Score)
+```
+
+1. What are 3 most important topics of a bad rating?
+
+We have categorized 1 & 2 ratings as bad rating. 
+
+Here, we consider both Summary and Score for topic modelling.
+
+Filtering bad(1 and 2) ratings
+```{r}
+baddf=nonspamdf[nonspamdf$Score==1|nonspamdf$Score==2,]
+```
+
+Topic Modelling on summary of bad reviews
+```{r}
+lower_text =tolower(baddf$Summary)
+ctext = Corpus(VectorSource(lower_text))
+rm(data)
+
+mallet.instances <- mallet.import(as.character(seq(1:length(lower_text))), 
+                                 lower_text, 
+                                 "/Users/preethiranganathan/Documents/Santa Clara/MachineLearning/project/stop.txt")
+
+topic.model <- MalletLDA(num.topics=3)
+topic.model$loadDocuments(mallet.instances)
+topic.model$setAlphaOptimization(20, 100) # optimise parameters after every 20 iterations which will be preceeded by 100 burnin
+topic.model$train(1000) # train the model
+topic.model$maximize(10)
+doc.topics <- mallet.doc.topics(topic.model, smoothed=T, normalized=T)
+topic.words <- mallet.topic.words(topic.model, smoothed=T, normalized=T)
+topics.labels <- rep("",3)
+for (topic in 1:3) topics.labels[topic] <- paste(mallet.top.words(topic.model, topic.words[topic,], num.top.words=80)$words, collapse=" ")
+topics.labels
+```
+
+The first topic talks about complaints related to health effects of defective food products. 
+The second topic talks about misleading/deceptive products, shipping, packaging services, damaged and expired products.
+The third topic talks about taste, flavor and smell aspects of the product. 
+
+Topic Modelling on text of bad reviews
+```{r}
+lower_text =tolower(baddf$Text)
+ctext = Corpus(VectorSource(lower_text))
+rm(data)
+
+mallet.instances <- mallet.import(as.character(seq(1:length(lower_text))), 
+                                 lower_text, 
+                                 "/Users/preethiranganathan/Documents/Santa Clara/MachineLearning/project/stop.txt")
+
+topic.model <- MalletLDA(num.topics=3)
+topic.model$loadDocuments(mallet.instances)
+topic.model$setAlphaOptimization(20, 100) # optimise parameters after every 20 iterations which will be preceeded by 100 burnin
+topic.model$train(1000) # train the model
+topic.model$maximize(10)
+doc.topics <- mallet.doc.topics(topic.model, smoothed=T, normalized=T)
+topic.words <- mallet.topic.words(topic.model, smoothed=T, normalized=T)
+topics.labels <- rep("",3)
+for (topic in 1:3) topics.labels[topic] <- paste(mallet.top.words(topic.model, topic.words[topic,], num.top.words=80)$words, collapse=" ")
+topics.labels
+
+```
+
+The first topic talks about packaging and shipping efficiency. 
+The second  topic talks about flavor, smell, taste, texture and brand value.
+The third topic talks about ingredients wether it is natural/organic or not. And wether the label details match the actual product.
+
+2. What are 3 most important topics of a good rating?
+
+Filtering good(4 and 5)  ratings
+```{r}
+goodf=nonspamdf[nonspamdf$Score==4|nonspamdf$Score==5,]
+```
+
+Topic Modelling on summary of good reviews
+
+```{r}
+lower_text =tolower(goodf$Summary)
+
+mallet.instances <- mallet.import(as.character(seq(1:length(lower_text))), 
+                                 lower_text, 
+                                 "/Users/preethiranganathan/Documents/Santa Clara/MachineLearning/project/stop.txt")
+
+topic.model <- MalletLDA(num.topics=3)
+topic.model$loadDocuments(mallet.instances)
+topic.model$setAlphaOptimization(20, 100) # optimise parameters after every 20 iterations which will be preceeded by 100 burnin
+topic.model$train(1000) # train the model
+topic.model$maximize(10)
+doc.topics <- mallet.doc.topics(topic.model, smoothed=T, normalized=T)
+topic.words <- mallet.topic.words(topic.model, smoothed=T, normalized=T)
+topics.labels <- rep("",3)
+for (topic in 1:3) topics.labels[topic] <- paste(mallet.top.words(topic.model, topic.words[topic,], num.top.words=80)$words, collapse=" ")
+topics.labels
+```
+
+Topic Modelling on text of good reviews
+```{r}
+lower_text =tolower(goodf$Text)
+
+mallet.instances <- mallet.import(as.character(seq(1:length(lower_text))), 
+                                 lower_text, 
+                                 "/Users/preethiranganathan/Documents/Santa Clara/MachineLearning/project/stop.txt")
+
+topic.model <- MalletLDA(num.topics=3)
+topic.model$loadDocuments(mallet.instances)
+topic.model$setAlphaOptimization(20, 100) # optimise parameters after every 20 iterations which will be preceeded by 100 burnin
+topic.model$train(1000) # train the model
+topic.model$maximize(10)
+doc.topics <- mallet.doc.topics(topic.model, smoothed=T, normalized=T)
+topic.words <- mallet.topic.words(topic.model, smoothed=T, normalized=T)
+topics.labels <- rep("",3)
+for (topic in 1:3) topics.labels[topic] <- paste(mallet.top.words(topic.model, topic.words[topic,], num.top.words=80)$words, collapse=" ")
+topics.labels
+
+```
+
+For word cloud
+```{r}
+ctext = Corpus(VectorSource(lower_text))
+ctext_nopunc_nonum = tm_map(ctext, removeNumbers) 
+ctext_nopunc = tm_map(ctext_nopunc_nonum, removePunctuation) 
+ctext_nopunc_nonum_nostop = tm_map(ctext_nopunc,removeWords, c("shall","us","unto","will","just","nothing","can" ,"much","dont","didnt","doesnt","never",  "upon","also","let","even","now","yet", "therefore","may","away","since","nothing", stopwords("english"))) 
+
+tdm2 = TermDocumentMatrix(ctext_nopunc_nonum_nostop,control=list(wordLengths=c(4, 15), 
+                                   bounds = list(global = c(50,Inf))))
+tdm3 = as.matrix(tdm2)
+wordcount = sort(rowSums(tdm3),decreasing=TRUE)
+tdm_names = names(wordcount)[1:150]
+tdm_names
+
+
+tdm2 = DocumentTermMatrix(ctext_nopunc_nonum_nostop, control=list(wordLengths=c(4, 15), 
+                                   bounds = list(global = c(25,Inf))))
+ui = unique(tdm2$i)
+dtm.new = tdm2[ui,]
+
+```
+
+Run with caution takes atleast 3 hrs to run this but works. Got Readability Score index for each review. Since this takes a lot of time to run, ran it one time and exported it as a csv.
+```{r}
+pacman::p_load_gh(c(
+    'trinker/lexicon',
+    'trinker/textclean',
+    'trinker/textshape',
+    "trinker/syllable", 
+    "trinker/readability"
+))
+
+pacman::p_load(syllable, readability)
+readable <- with(nonspamdf, readability(Text, list(Id)))
+write.csv(readable, file = "readability.csv",row.names=TRUE, na="")
+```
+
+Reading the readability csv file.
+```{r}
+readability_index<-fread('/Users/preethiranganathan/Documents/Santa Clara/MachineLearning/project/readability.csv')
+readcomplete=inner_join(nonspamdf,readability_index, by = "Id")
+
+# Helpfulness Score
+readcomplete$HelpfulnessScore=with(readcomplete,HelpfulnessNumerator/HelpfulnessDenominator)
+readcomplete[is.na(readcomplete$HelpfulnessScore),]$HelpfulnessScore=0
+```
+
+Takes a lot of time to run. Got Sentiment Score index for each review. Since this takes a lot of time to run, ran it one time and exported it as a csv.
+```{r}
+sentimentdf <- with(nonspamdf, sentiment_by(get_sentences(Text), list(Id)))
+write.csv(sentimentdf, file = "sentimentdf.csv",row.names=TRUE, na="")
+```
+
+Reading the sentiment score csv file.
+```{r}
+senti<-fread('/Users/preethiranganathan/Documents/Santa Clara/MachineLearning/project/sentimentdf.csv')
+senticomplete=inner_join(readcomplete,senti, by = "Id")
+senticomplete = subset(senticomplete, select = -c(Num_reviews,V1.x,Automated_Readability_Index,V1.y,sd,Average_Grade_Level,Coleman_Liau,SMOG,Flesch_Kincaid,Time) )
+#senticomplete$SentenceCount =nsentence(senticomplete$Text)
+```
+
+Correlation
+```{r}
+corsenti=subset(senticomplete, select = -c(UserId,Text,Summary) )
+corsenti=corsenti[complete.cases(corsenti),]
+cor(corsenti)
+# Correlation between sentence count and word count is 0.84305176(very high). Hence, we should one of the variables.
+```
+ Max.   :89.36296   Max.   :0.50000   Max.   :2013.0   Max.   : 3.01177 
+ 
+
+```{r}
+# Helpfulness score 
+senticomplete$HelpfulnessScore_bin=0
+senticomplete[senticomplete$HelpfulnessScore>0.5,]$HelpfulnessScore_bin=1
+senticomplete=senticomplete[complete.cases(senticomplete),]
+
+# Filtering the reviews which doesn't have any survey 
+filtered=senticomplete[senticomplete$HelpfulnessDenominator>0,]
+filtered=filtered[complete.cases(filtered),]
+
+# Taking out the helpful reviews
+helpfulreviews=filtered[filtered$HelpfulnessScore_bin==1,]
+summary(helpfulreviews$Text)
+
+# Top 200 words
+lower_text =tolower(helpfulreviews$Text)
+ctext = Corpus(VectorSource(lower_text))
+ctext_nopunc_nonum = tm_map(ctext, removeNumbers) 
+ctext_nopunc = tm_map(ctext_nopunc_nonum, removePunctuation) 
+ctext_nopunc_nonum_nostop = tm_map(ctext_nopunc,removeWords, c("shall","us","unto","will","just","nothing","can" ,"much","dont","didnt","doesnt","never",  "upon","also","let","even","now","yet", "therefore","may","away","since","nothing", stopwords("english"))) 
+
+tdm2 = TermDocumentMatrix(ctext_nopunc_nonum_nostop,control=list(wordLengths=c(4, 15), 
+                                   bounds = list(global = c(50,Inf))))
+tdm3 = as.matrix(tdm2)
+wordcount = sort(rowSums(tdm3),decreasing=TRUE)
+tdm_names = names(wordcount)[1:200]
+
+# Similiarity Calculation
+m = length(senticomplete$Text)  # No of sentences in input
+text=senticomplete$Text
+jaccard = matrix(0,m,1)  #Store match index
+b = tdm_names ; bb = unlist(strsplit(b," "))
+for (i in 1:m) {
+        a = text[i]; aa = unlist(strsplit(a," "))
+         jaccard[i]  = length(intersect(aa,bb))/
+                          length(union(aa,bb))
+}
+senticomplete$SimiliarityScore=jaccard
+
+# To run regression
+regdata=subset(senticomplete, select = -c(UserId,Text,Summary) )
+regdata=regdata[complete.cases(regdata),]
+regdata1=regdata[regdata$HelpfulnessDenominator>0,]
+
+```
+
+
+
+```{r}
+idx = seq(1,length(regdata1[,1]))
+train_idx = sample(idx,round(nrow(regdata1)*4/5))
+test_idx = setdiff(idx,train_idx)
+x_train = regdata1[train_idx,c(2,5,7,8,10)]
+x_test = regdata1[test_idx,c(2,5,7,8,10)]
+y_train = regdata1[train_idx,9]
+y_test = regdata1[test_idx,9]
+
+mod1=lm(y_train~  Gunning_Fog_Index+ word_count + ave_sentiment + Score+ SimiliarityScore , data=x_train)
+summary(mod1)
+
+#logistic regression
+mod2=glm(y_train~ Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=x_train, family=binomial(link="logit"))
+summary(mod2)
+
+a=predict(mod2, newdata=x_test, type='response')
+cm=table(y_test,round(a))
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+
+# LDA
+mod3 = lda(y_train~ Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=x_train)
+pred3 = predict(mod3, newdata=x_test,type="response")
+cm=table(y_test,pred3$class)
+print(cm)
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+print(chisq.test(cm))
+
+# KNN
+mod6 = knn(x_train, x_test, y_train, k = 2, prob = FALSE, use.all = TRUE)
+summary(mod6)
+cm = table(mod6,y_test)
+cm
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+print(chisq.test(cm))
+# All the measures have reduced. Don't use.
+
+# Naive Bayes
+mod4 <- naiveBayes(factor(y_train)~ Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=x_train)
+summary(mod4)
+pred4 <- predict(mod4, newdata=x_test,type='class')
+cm=table(pred4,y_test)
+print(cm)
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+print(chisq.test(cm))
+
+#XGboost
+numberOfClasses <- 2
+xgb_params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "mlogloss",
+                   "num_class" = numberOfClasses)
+
+dtrain <- xgb.DMatrix(data = as.matrix(x_train), label=as.matrix(y_train))
+dtest <- xgb.DMatrix(data = as.matrix(x_test), label=as.matrix(y_test))
+
+watchlist <- list(train=dtrain, test=dtest)
+bst <- xgb.train(data=dtrain, max.depth=2, eta=1, nthread = 2, nround=75, watchlist=watchlist, objective = "binary:logistic")
+
+test_pred <- predict(bst, newdata = dtest)
+cm=table(y_test,round(test_pred))
+print(cm)
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+print(chisq.test(cm))
+
+# SVM
+mod5 <- svm(factor(y_train) ~  Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=x_train)
+pred5 <- predict(mod5, newdata = x_test)
+cm=table(factor(y_test),pred5)
+print(cm)
+print(chisq.test(cm))
+print(cm)
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+print(chisq.test(cm))
+```
+
+
+```{r}
+
+metric <- "Accuracy"
+preProcess=c("center", "scale")
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+seed <- 7
+
+# Linear Discriminant Analysis
+set.seed(seed)
+fit.lda <- train(factor(HelpfulnessScore_bin) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=regdata1, method="lda", metric=metric, preProc=c("center", "scale"), trControl=control)
+# Logistic Regression
+set.seed(seed)
+fit.glm <- train(factor(HelpfulnessScore_bin) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=regdata1, method="glm", metric=metric, trControl=control)
+# GLMNET
+set.seed(seed)
+fit.glmnet <- train(factor(HelpfulnessScore_bin) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=regdata1, method="glmnet",preProc=c("center", "scale"), metric=metric, trControl=control)
+# SVM Radial
+set.seed(seed)
+fit.svmRadial <- train(factor(HelpfulnessScore_bin) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=regdata1, method="svmRadial", metric=metric, preProc=c("center", "scale"), trControl=control, fit=FALSE)
+# kNN
+set.seed(seed)
+fit.knn <- train(factor(y_train) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=x_train, data=dataset, method="knn", metric=metric, preProc=c("center", "scale"), trControl=control)
+# Naive Bayes
+set.seed(seed)
+fit.nb <- train(factor(HelpfulnessScore_bin) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=regdata1, data=dataset, method="nb", metric=metric, trControl=control)
+# CART
+set.seed(seed)
+fit.cart <- train(factor(HelpfulnessScore_bin) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=regdata1, method="rpart", metric=metric, trControl=control)
+# C5.0
+set.seed(seed)
+fit.c50 <- train(factor(y_train) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=x_train, method="C5.0", metric=metric, trControl=control)
+# Bagged CART
+set.seed(seed)
+fit.treebag <- train(factor(HelpfulnessScore_bin) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=regdata1, method="treebag", metric=metric, trControl=control)
+# Random Forest
+set.seed(seed)
+fit.rf <- train(factor(HelpfulnessScore_bin) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=regdata1, method="rf", metric=metric, trControl=control)
+# Stochastic Gradient Boosting (Generalized Boosted Modeling)
+set.seed(seed)
+fit.gbm <- train(factor(HelpfulnessScore_bin) ~Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=regdata1,method="gbm", metric=metric, trControl=control, verbose=FALSE)
+```
+
+# Classification - 3 categories
+```{r}
+senticomplete=senticomplete[complete.cases(senticomplete),]
+
+# Similiarity Calculation
+m = length(senticomplete$Text)  # No of sentences in input
+text=senticomplete$Text
+jaccard = matrix(0,m,1)  #Store match index
+b = tdm_names ; bb = unlist(strsplit(b," "))
+for (i in 1:m) {
+        a = text[i]; aa = unlist(strsplit(a," "))
+         jaccard[i]  = length(intersect(aa,bb))/
+                          length(union(aa,bb))
+}
+senticomplete$SimiliarityScore=jaccard
+
+regdata2=subset(senticomplete, select = -c(UserId,Text,Summary) )
+regdata2=regdata2[complete.cases(regdata2),]
+regdata2[regdata2$HelpfulnessDenominator==0,]$HelpfulnessScore_bin=2
+
+idx = seq(1,length(regdata2[,1]))
+train_idx = sample(idx,round(nrow(regdata2)*4/5))
+test_idx = setdiff(idx,train_idx)
+x_train = regdata2[train_idx,c(2,5,7,8,10)]
+x_test = regdata2[test_idx,c(2,5,7,8,10)]
+y_train = regdata2[train_idx,9]
+y_test = regdata2[test_idx,9]
+
+# LDA
+mod3 = lda(y_train~ Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=x_train)
+pred3 = predict(mod3, newdata=x_test,type="response")
+cm=table(y_test,pred3$class)
+print(cm)
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+print(chisq.test(cm))
+
+# KNN
+mod6 = knn(x_train, x_test, y_train, k = 3, prob = FALSE, use.all = TRUE)
+summary(mod6)
+cm = table(mod6,y_test)
+cm
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+print(chisq.test(cm))
+
+# Multinomial Regression
+
+library(nnet)
+res  = multinom(y_train~ Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=x_train)
+res
+p1 <- predict(res, x_test, type = "class")
+cm=table(y_test,p1)
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+print(chisq.test(cm))
+
+#Naive Bayes
+model4 <- naiveBayes(factor(y_train)~ Gunning_Fog_Index+ word_count +ave_sentiment+ Score+ SimiliarityScore, data=x_train)
+pred4 <- predict(model4, newdata=x_test)
+cm=table(y_test, pred4)
+print(cm)
+(Accuracy=sum(diag(cm))/sum(cm))
+(recall=cm[2,2]/sum(cm[,2]))
+(precision=cm[2,2]/sum(cm[2,]))
+(F1=2/((1/recall)+(1/precision)))
+print(chisq.test(cm))
+
+#XGboost
+numberOfClasses <- 3
+xgb_params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "mlogloss",
+                   "num_class" = numberOfClasses)
+
+regmatrix=as.matrix(regdata2)
+
+dtrain <- xgb.DMatrix(data = as.matrix(x_train), label=as.matrix(y_train))
+dtest <- xgb.DMatrix(data = as.matrix(x_test), label=as.matrix(y_test))
+
+watchlist <- list(train=dtrain, test=dtest)
+bst <- xgb.train(data=dtrain, max.depth=2, eta=1, nthread = 2, nround=75, watchlist=watchlist,num_class = 3, objective = "multi:softprob")
+
+test_pred <- predict(bst, newdata = dtest)
+test_prediction <- matrix(test_pred, nrow = numberOfClasses,
+                          ncol=length(test_pred)/numberOfClasses) %>%
+  t() %>%
+  data.frame() %>%
+  mutate(label = as.matrix(y_test) + 1,
+         max_prob = max.col(., "last"))
+
+#confusion matrix of test set
+confusionMatrix(factor(test_prediction$max_prob),
+                factor(test_prediction$label),
+                mode = "everything")
+```
+
+```{r}
+idx = seq(1,length(regdata1[,1]))
+train_idx = sample(idx,round(nrow(regdata1)*4/5))
+test_idx = setdiff(idx,train_idx)
+x_train = regdata1[train_idx,c(2,3,4,5,7,8,10)]
+x_test = regdata1[test_idx,c(2,3,4,5,7,8,10)]
+y_train = regdata1[train_idx,9]
+y_test = regdata1[test_idx,9]
+
+newy=(2*x_train$HelpfulnessNumerator-(x_train$HelpfulnessDenominator))/(x_train$HelpfulnessDenominator)
+newy[newy==-1]=-0.99
+newy[newy==1]=0.99
+range(newy)
+yt = atanh(newy)
+yt[yt>0.25]=1
+a=-0.25
+yt[yt<(a)]=2
+yt[yt>(-0.25)&yt<0.25]=3
+tanmodel=lda(factor(yt)~  Gunning_Fog_Index+ word_count + ave_sentiment + Score+ SimiliarityScore , data=x_train)
+summary(tanmodel)
+pred=predict(tanmodel,newdata=x_test,type="response")
+
+ytest=(2*(x_test$HelpfulnessNumerator)-(x_test$HelpfulnessDenominator))/(x_test$HelpfulnessDenominator)
+summary(ytest)
+ytest[ytest>0.25] = 1
+ytest[ytest< (-0.25)] = 2
+ytest[ytest>-0.25 & ytest<0.25] = 3
+
+cm=table(y_test,pred3$class)
+print(cm)
+
+table(ytest,pred)
+ytest<-0.25
+```
